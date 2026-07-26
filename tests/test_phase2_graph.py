@@ -1,0 +1,191 @@
+"""Phase 2 graph integration and retry guardrail tests."""
+
+from __future__ import annotations
+
+import os
+from typing import Any
+
+import docker
+import pytest
+from docker.errors import DockerException, ImageNotFound
+from pydantic import ValidationError
+
+from src.agent.graph import AgentState, create_graph, initial_state
+from src.agent.tools import CodeGenerationOutput, PlanOutput, PlanStep, PythonExecutionInput
+from src.sandbox.test_sandbox import SandboxResult
+
+
+USER_PROMPT = "Calculate the 50th Fibonacci number and plot a trend chart."
+
+
+class StaticPlanner:
+    def invoke(self, input: object, **kwargs: Any) -> PlanOutput:
+        return PlanOutput(
+            objective=USER_PROMPT,
+            steps=[
+                PlanStep(
+                    index=1,
+                    instruction="Calculate Fibonacci values from F(0) through F(50).",
+                    expected_result="F(50) is printed.",
+                ),
+                PlanStep(
+                    index=2,
+                    instruction="Render the trend with a standard-library SVG polyline.",
+                    expected_result="An SVG trend chart is printed.",
+                ),
+            ],
+        )
+
+
+class StaticCoder:
+    def invoke(self, input: object, **kwargs: Any) -> CodeGenerationOutput:
+        code = """\
+values = [0, 1]
+for _ in range(2, 51):
+    values.append(values[-1] + values[-2])
+
+sample = values[::5]
+width, height = 500, 160
+maximum = max(sample)
+points = " ".join(
+    f"{index * width / (len(sample) - 1):.1f},{height - value * height / maximum:.1f}"
+    for index, value in enumerate(sample)
+)
+svg = (
+    f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}">'
+    f'<polyline fill="none" stroke="#38bdf8" stroke-width="3" points="{points}"/>'
+    "</svg>"
+)
+print(f"FIBONACCI_50={values[50]}")
+print(f"TREND_SVG={svg}")
+"""
+        return CodeGenerationOutput(
+            code=code,
+            timeout_seconds=5,
+            summary="Calculate F(50) and print a dependency-free SVG trend chart.",
+        )
+
+
+def _docker_is_ready() -> bool:
+    try:
+        client = docker.from_env()
+        client.ping()
+        client.images.get("python:3.12-slim")
+    except (DockerException, ImageNotFound):
+        return False
+    return True
+
+
+@pytest.mark.integration
+def test_fibonacci_prompt_runs_through_graph_and_real_sandbox() -> None:
+    if not _docker_is_ready():
+        pytest.skip("Docker daemon or python:3.12-slim image is unavailable")
+
+    app = create_graph(planner=StaticPlanner(), coder=StaticCoder())
+    final_state: AgentState = app.invoke(initial_state(USER_PROMPT))
+
+    assert final_state["status"] == "completed"
+    assert final_state["retry_count"] == 0
+    assert len(final_state["execution_artifacts"]) == 1
+    assert final_state["execution_artifacts"][0]["result"]["status"] == "success"
+    assert "FIBONACCI_50=12586269025" in final_state["final_output"]
+    assert "TREND_SVG=<svg" in final_state["final_output"]
+
+
+class AlwaysBrokenCoder:
+    def invoke(self, input: object, **kwargs: Any) -> CodeGenerationOutput:
+        return CodeGenerationOutput(
+            code="raise RuntimeError('still broken')",
+            timeout_seconds=1,
+            summary="Exercise retry guardrails.",
+        )
+
+
+def _always_fails(code: str, *, timeout_seconds: float) -> SandboxResult:
+    return SandboxResult(
+        status="error",
+        exit_code=1,
+        error_type="RuntimeError",
+        error_message="still broken",
+        traceback="RuntimeError: still broken",
+        duration_seconds=0.01,
+    )
+
+
+def test_retry_guardrail_stops_after_configured_corrections() -> None:
+    app = create_graph(
+        planner=StaticPlanner(),
+        coder=AlwaysBrokenCoder(),
+        sandbox_runner=_always_fails,
+        max_retries=3,
+    )
+    final_state: AgentState = app.invoke(initial_state(USER_PROMPT))
+
+    assert final_state["status"] == "failed"
+    assert final_state["retry_count"] == 3
+    assert len(final_state["execution_artifacts"]) == 4
+    assert len(final_state["error_stack"]) == 4
+    assert "RuntimeError: still broken" in final_state["final_output"]
+
+
+def test_tool_schema_rejects_unknown_fields_and_unsafe_timeout() -> None:
+    with pytest.raises(ValidationError):
+        PythonExecutionInput.model_validate(
+            {"code": "print('hello')", "timeout_seconds": 1, "network": True}
+        )
+    with pytest.raises(ValidationError):
+        PythonExecutionInput(code="print('hello')", timeout_seconds=31)
+
+
+class InvalidThenValidCoder:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def invoke(self, input: object, **kwargs: Any) -> CodeGenerationOutput:
+        self.calls += 1
+        if self.calls == 1:
+            return CodeGenerationOutput.model_validate(
+                {
+                    "code": "print('invalid timeout')",
+                    "timeout_seconds": 60,
+                    "summary": "Deliberately violate the timeout schema.",
+                }
+            )
+        return StaticCoder().invoke(input, **kwargs)
+
+
+def _always_succeeds(code: str, *, timeout_seconds: float) -> SandboxResult:
+    return SandboxResult(
+        status="success",
+        exit_code=0,
+        logs="FIBONACCI_50=12586269025\nTREND_SVG=<svg></svg>\n",
+        duration_seconds=0.01,
+    )
+
+
+def test_coder_schema_violation_enters_bounded_healing_loop() -> None:
+    coder = InvalidThenValidCoder()
+    app = create_graph(
+        planner=StaticPlanner(),
+        coder=coder,
+        sandbox_runner=_always_succeeds,
+        max_retries=3,
+    )
+    final_state: AgentState = app.invoke(initial_state(USER_PROMPT))
+
+    assert final_state["status"] == "completed"
+    assert final_state["retry_count"] == 1
+    assert len(final_state["execution_artifacts"]) == 1
+    assert "Coder schema validation failed" in final_state["error_stack"][0]
+    assert coder.calls == 2
+
+
+@pytest.mark.ollama
+def test_live_ollama_graph() -> None:
+    if os.getenv("TRACEMIND_RUN_OLLAMA_TESTS") != "1":
+        pytest.skip("Set TRACEMIND_RUN_OLLAMA_TESTS=1 to run local model integration")
+    if not _docker_is_ready():
+        pytest.skip("Docker daemon or python:3.12-slim image is unavailable")
+
+    final_state: AgentState = create_graph().invoke(initial_state(USER_PROMPT))
+    assert final_state["status"] == "completed", final_state["final_output"]
