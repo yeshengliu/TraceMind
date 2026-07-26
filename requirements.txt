@@ -1,0 +1,9 @@
+# Phase 1: local model connectivity and isolated execution
+docker>=7.1,<8
+httpx>=0.27,<1
+pydantic>=2.8,<3
+python-dotenv>=1.0,<2
+
+# Development and verification
+pytest>=8.2,<9
+pytest-timeout>=2.3,<3
