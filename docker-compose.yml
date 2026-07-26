@@ -1,0 +1,20 @@
+services:
+  sandbox:
+    image: python:3.12-slim
+    network_mode: none
+    read_only: true
+    user: "65534:65534"
+    working_dir: /workspace
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 64
+    mem_limit: 256m
+    cpus: 0.50
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=64m
+    command:
+      - python
+      - -c
+      - "print('TraceMind sandbox is ready')"
