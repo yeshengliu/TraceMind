@@ -52,3 +52,19 @@ pytest -q
 Configuration can be overridden with `TRACEMIND_OLLAMA_BASE_URL`,
 `TRACEMIND_PLANNER_MODEL`, `TRACEMIND_CODER_MODEL`, and
 `TRACEMIND_LLM_TIMEOUT_SECONDS`.
+
+## Phase 3/4: Targeted healing and bounded memory
+
+Sandbox failures are parsed into structured stack frames and terminal exception
+details. The local coder model returns minimal exact-text edits, which TraceMind
+validates and applies as a unified diff before retrying the sandbox. Invalid
+patches fall back to schema-constrained regeneration.
+
+`ContextPruner` keeps system instructions, user intent, the current plan, latest
+code, newest full traceback, and newest patch. Older attempts and verbose logs
+are compacted into bounded summaries. Successful runs are recorded separately
+in `EpisodicMemory` and can be exported as JSONL.
+
+```bash
+pytest tests/test_phase3_reflection_memory.py -q
+```
