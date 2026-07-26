@@ -1,4 +1,16 @@
 services:
+  phoenix:
+    image: arizephoenix/phoenix:latest
+    profiles:
+      - observability
+    ports:
+      - "6006:6006"
+      - "4317:4317"
+    environment:
+      PHOENIX_WORKING_DIR: /mnt/data
+    volumes:
+      - phoenix_data:/mnt/data
+
   sandbox:
     image: python:3.12-slim
     network_mode: none
@@ -18,3 +30,6 @@ services:
       - python
       - -c
       - "print('TraceMind sandbox is ready')"
+
+volumes:
+  phoenix_data:

@@ -68,3 +68,38 @@ in `EpisodicMemory` and can be exported as JSONL.
 ```bash
 pytest tests/test_phase3_reflection_memory.py -q
 ```
+
+## Phase 5: Animated dashboard and local observability
+
+The Streamlit dashboard streams observable LangGraph node updates from a
+background worker. It shows node activity, bounded execution summaries, the
+state-transition topology, context/token estimates, retry counts, sandbox
+artifacts, and terminal output. It intentionally exposes plans, tool results,
+errors, and targeted repairs—not private hidden chain-of-thought.
+
+Start the optional local Phoenix collector, then launch the dashboard:
+
+```bash
+docker compose --profile observability up -d phoenix
+streamlit run app.py
+```
+
+Phoenix is available at `http://localhost:6006`. TraceMind continues to run if
+the collector is offline. Set `TRACEMIND_TRACING_ENABLED=0` to disable
+instrumentation, or configure `TRACEMIND_PHOENIX_URL` and
+`TRACEMIND_PHOENIX_PROJECT` for a different local endpoint/project.
+
+Sandbox programs can expose rich results by printing one artifact per line:
+
+```text
+TREND_SVG=<svg ...>...</svg>
+ARTIFACT_PNG_BASE64=<base64 PNG>
+ARTIFACT_MARKDOWN=## Report
+ARTIFACT_JSON={"value": 42}
+```
+
+Verify the controller, dashboard boot, visual models, and Phase 1 binding:
+
+```bash
+pytest tests/test_phase5_ui.py -q
+```
