@@ -11,6 +11,13 @@ from docker.errors import DockerException, ImageNotFound
 from pydantic import ValidationError
 
 from src.agent.graph import AgentState, create_graph, initial_state
+from src.agent.reflection import (
+    CodePatch,
+    PatchEdit,
+    ReflectionResult,
+    apply_code_patch,
+    parse_traceback,
+)
 from src.agent.tools import CodeGenerationOutput, PlanOutput, PlanStep, PythonExecutionInput
 from src.sandbox.test_sandbox import SandboxResult
 
@@ -101,6 +108,32 @@ class AlwaysBrokenCoder:
         )
 
 
+class ProgressiveReflector:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def reflect(self, failed_code: str, traceback_text: str) -> ReflectionResult:
+        self.calls += 1
+        patch = CodePatch(
+            root_cause="The deliberately broken expression still raises.",
+            edits=[
+                PatchEdit(
+                    old_text="still broken",
+                    new_text=f"still broken {self.calls}",
+                    reason="Change the failed code while exercising retry routing.",
+                )
+            ],
+            validation_notes="The fake sandbox remains configured to fail.",
+        )
+        patched_code, unified_diff = apply_code_patch(failed_code, patch)
+        return ReflectionResult(
+            parsed_traceback=parse_traceback(traceback_text),
+            patch=patch,
+            patched_code=patched_code,
+            unified_diff=unified_diff,
+        )
+
+
 def _always_fails(code: str, *, timeout_seconds: float) -> SandboxResult:
     return SandboxResult(
         status="error",
@@ -116,6 +149,7 @@ def test_retry_guardrail_stops_after_configured_corrections() -> None:
     app = create_graph(
         planner=StaticPlanner(),
         coder=AlwaysBrokenCoder(),
+        reflector=ProgressiveReflector(),
         sandbox_runner=_always_fails,
         max_retries=3,
     )
@@ -123,8 +157,9 @@ def test_retry_guardrail_stops_after_configured_corrections() -> None:
 
     assert final_state["status"] == "failed"
     assert final_state["retry_count"] == 3
-    assert len(final_state["execution_artifacts"]) == 4
-    assert len(final_state["error_stack"]) == 4
+    assert len(final_state["execution_artifacts"]) <= 2
+    assert len(final_state["error_stack"]) == 1
+    assert len(final_state["patch_history"]) == 1
     assert "RuntimeError: still broken" in final_state["final_output"]
 
 

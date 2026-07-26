@@ -3,15 +3,17 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Callable
-from typing import Annotated, Any, Literal, NotRequired, Protocol, TypedDict
+from typing import Any, Literal, NotRequired, Protocol, TypedDict
 
 from langchain_core.messages import AIMessage, AnyMessage, HumanMessage, SystemMessage
 from langgraph.graph import END, START, StateGraph
-from langgraph.graph.message import add_messages
 from pydantic import BaseModel, ValidationError
 
 from src.agent.llm import ModelRole, get_structured_llm
+from src.agent.reflection import (
+    ReflectionResult,
+    TracebackReflector,
+)
 from src.agent.tools import (
     CodeGenerationOutput,
     PlanOutput,
@@ -20,6 +22,7 @@ from src.agent.tools import (
     SandboxRunner,
     execute_python,
 )
+from src.memory.pruner import ContextPruner, EpisodicMemory
 from src.sandbox.test_sandbox import run_in_sandbox
 
 
@@ -38,22 +41,19 @@ container with only the Python standard library installed. Never import
 matplotlib, numpy, pandas, seaborn, plotly, or any other third-party package.
 For charts, generate and print a literal SVG string or an ASCII chart; do not
 open a GUI or depend on a file surviving the container. Print every requested
-result or artifact to stdout. Do not access the network, spawn processes, or
-read host files. Use a timeout_seconds value from 0.1 through 30 inclusive.
-Return only data matching the supplied JSON schema.
+result or artifact to stdout. Prefer SVG for charts. If using ASCII, build a
+list of lines and print each line; do not embed escaped newlines inside quoted
+Python string literals. Do not access the network, spawn processes, or read
+host files. Use a timeout_seconds value from 0.1 through 30 inclusive. Return
+only data matching the supplied JSON schema.
 """
 
-HEALING_SYSTEM_PROMPT = """\
-The previous sandbox execution failed. Produce a corrected, complete replacement
-program. Use the error type, message, and traceback as evidence. Preserve the
-original objective and do not repeat the failing implementation. The sandbox
-contains no third-party packages: never import matplotlib, numpy, pandas,
-seaborn, plotly, or similar libraries. Replace unavailable plotting packages
-with a printed literal SVG string or ASCII chart. Use a timeout_seconds value
-from 0.1 through 30 inclusive. Return only data matching the supplied JSON
-schema.
+REGENERATION_FALLBACK_PROMPT = f"""\
+{CODER_SYSTEM_PROMPT}
+A targeted edit could not produce valid Python. Use the supplied failed_code
+and latest_error to return one complete corrected replacement. Eliminate the
+reported failure instead of preserving the malformed block.
 """
-
 
 class StructuredModel(Protocol):
     """Minimal interface required from structured LangChain model runnables."""
@@ -62,26 +62,37 @@ class StructuredModel(Protocol):
         ...
 
 
+class Reflector(Protocol):
+    def reflect(self, failed_code: str, traceback_text: str) -> ReflectionResult:
+        ...
+
+
 class AgentState(TypedDict):
     """Shared, inspectable state persisted across every graph node."""
 
-    messages: Annotated[list[AnyMessage], add_messages]
+    messages: list[AnyMessage]
     current_plan: list[str]
     error_stack: list[str]
     retry_count: int
     execution_artifacts: list[dict[str, Any]]
+    patch_history: list[dict[str, Any]]
+    history_summary: list[str]
     generated_code: NotRequired[str]
     code_summary: NotRequired[str]
     requested_timeout_seconds: NotRequired[float]
     status: NotRequired[Literal["planning", "coding", "executing", "healing", "completed", "failed"]]
     final_output: NotRequired[str]
+    episode_id: NotRequired[str]
 
 
 class GraphDependencies(TypedDict):
     planner: StructuredModel
     coder: StructuredModel
+    reflector: Reflector
     sandbox_runner: SandboxRunner
     max_retries: int
+    pruner: ContextPruner
+    episodic_memory: EpisodicMemory
 
 
 def initial_state(user_prompt: str) -> AgentState:
@@ -94,6 +105,8 @@ def initial_state(user_prompt: str) -> AgentState:
         error_stack=[],
         retry_count=0,
         execution_artifacts=[],
+        patch_history=[],
+        history_summary=[],
         status="planning",
     )
 
@@ -121,21 +134,43 @@ def create_graph(
     *,
     planner: StructuredModel | None = None,
     coder: StructuredModel | None = None,
+    reflector: Reflector | None = None,
     sandbox_runner: SandboxRunner = run_in_sandbox,
     max_retries: int = DEFAULT_MAX_RETRIES,
+    pruner: ContextPruner | None = None,
+    episodic_memory: EpisodicMemory | None = None,
 ):
     """Build and compile the graph with injectable dependencies for testing."""
     if max_retries < 0:
         raise ValueError("max_retries must be non-negative")
 
+    context_pruner = pruner or ContextPruner()
+    episode_store = episodic_memory or EpisodicMemory()
     dependencies: GraphDependencies = {
         "planner": planner or get_structured_llm(ModelRole.PLANNER, PlanOutput),
         "coder": coder or get_structured_llm(ModelRole.CODER, CodeGenerationOutput),
+        "reflector": reflector or TracebackReflector(),
         "sandbox_runner": sandbox_runner,
         "max_retries": max_retries,
+        "pruner": context_pruner,
+        "episodic_memory": episode_store,
     }
 
-    def planner_node(state: AgentState) -> dict[str, Any]:
+    def transition(
+        state: AgentState,
+        updates: dict[str, Any],
+        *,
+        messages: list[AnyMessage] | None = None,
+        prune: bool = True,
+    ) -> AgentState:
+        merged: dict[str, Any] = dict(state)
+        merged.update(updates)
+        merged["messages"] = [*state["messages"], *(messages or [])]
+        if prune:
+            merged = dependencies["pruner"].prune_state(merged)
+        return AgentState(**merged)
+
+    def planner_node(state: AgentState) -> AgentState:
         request = _latest_user_text(state["messages"])
         response = dependencies["planner"].invoke(
             [SystemMessage(content=PLANNER_SYSTEM_PROMPT), HumanMessage(content=request)]
@@ -146,21 +181,26 @@ def create_graph(
             f"{step.index}. {step.instruction} -> {step.expected_result}"
             for step in plan.steps
         ]
-        return {
-            "current_plan": visible_plan,
-            "status": "coding",
-            "messages": [AIMessage(content=f"Plan created with {len(plan.steps)} steps.")],
-        }
+        return transition(
+            state,
+            {"current_plan": visible_plan, "status": "coding"},
+            messages=[AIMessage(content=f"Plan created with {len(plan.steps)} steps.")],
+        )
 
-    def coder_node(state: AgentState) -> dict[str, Any]:
+    def coder_node(state: AgentState) -> AgentState:
         request = _latest_user_text(state["messages"])
         context = {
             "user_request": request,
             "plan": state["current_plan"],
             "retry_count": state["retry_count"],
             "latest_error": state["error_stack"][-1] if state["error_stack"] else None,
+            "failed_code": state.get("generated_code") if state["error_stack"] else None,
         }
-        system_prompt = HEALING_SYSTEM_PROMPT if state["error_stack"] else CODER_SYSTEM_PROMPT
+        system_prompt = (
+            REGENERATION_FALLBACK_PROMPT
+            if state["error_stack"] and state.get("generated_code")
+            else CODER_SYSTEM_PROMPT
+        )
         try:
             response = dependencies["coder"].invoke(
                 [
@@ -172,11 +212,14 @@ def create_graph(
         except ValidationError as exc:
             schema_error = f"Coder schema validation failed: {exc}"
             exhausted = state["retry_count"] >= dependencies["max_retries"]
-            return {
-                "error_stack": [*state["error_stack"], schema_error],
-                "status": "failed" if exhausted else "healing",
-                "final_output": schema_error,
-                "messages": [
+            return transition(
+                state,
+                {
+                    "error_stack": [*state["error_stack"], schema_error],
+                    "status": "failed" if exhausted else "healing",
+                    "final_output": schema_error,
+                },
+                messages=[
                     AIMessage(
                         content=(
                             "Coder output violated the tool schema; "
@@ -184,15 +227,18 @@ def create_graph(
                         )
                     )
                 ],
-            }
+            )
         assert isinstance(generated, CodeGenerationOutput)
-        return {
-            "generated_code": generated.code,
-            "code_summary": generated.summary,
-            "requested_timeout_seconds": generated.timeout_seconds,
-            "status": "executing",
-            "messages": [AIMessage(content=f"Code prepared: {generated.summary}")],
-        }
+        return transition(
+            state,
+            {
+                "generated_code": generated.code,
+                "code_summary": generated.summary,
+                "requested_timeout_seconds": generated.timeout_seconds,
+                "status": "executing",
+            },
+            messages=[AIMessage(content=f"Code prepared: {generated.summary}")],
+        )
 
     def route_after_coding(
         state: AgentState,
@@ -203,7 +249,7 @@ def create_graph(
             return "reflect_and_heal"
         return END
 
-    def sandbox_executor_node(state: AgentState) -> dict[str, Any]:
+    def sandbox_executor_node(state: AgentState) -> AgentState:
         request = PythonExecutionInput(
             code=state["generated_code"],
             timeout_seconds=state["requested_timeout_seconds"],
@@ -215,28 +261,37 @@ def create_graph(
             "request": request.model_dump(mode="json"),
             "result": result.model_dump(mode="json"),
         }
-        return {
-            "execution_artifacts": [*state["execution_artifacts"], artifact],
-            "status": "executing",
-        }
+        return transition(
+            state,
+            {
+                "execution_artifacts": [*state["execution_artifacts"], artifact],
+                "status": "executing",
+            },
+            prune=False,
+        )
 
-    def error_detector_node(state: AgentState) -> dict[str, Any]:
+    def error_detector_node(state: AgentState) -> AgentState:
         artifact = state["execution_artifacts"][-1]
         result = PythonExecutionOutput.model_validate(artifact["result"])
         if result.status == "success":
-            return {
-                "status": "completed",
-                "final_output": result.logs,
-                "messages": [AIMessage(content="Sandbox execution completed successfully.")],
-            }
+            completed = transition(
+                state,
+                {"status": "completed", "final_output": result.logs},
+                messages=[AIMessage(content="Sandbox execution completed successfully.")],
+            )
+            episode = dependencies["episodic_memory"].record_success(completed)
+            return transition(completed, {"episode_id": episode.episode_id})
 
         errors = [*state["error_stack"], _artifact_error(artifact)]
         exhausted = state["retry_count"] >= dependencies["max_retries"]
-        return {
-            "error_stack": errors,
-            "status": "failed" if exhausted else "healing",
-            "final_output": result.traceback or result.error_message or result.logs,
-            "messages": [
+        return transition(
+            state,
+            {
+                "error_stack": errors,
+                "status": "failed" if exhausted else "healing",
+                "final_output": result.traceback or result.error_message or result.logs,
+            },
+            messages=[
                 AIMessage(
                     content=(
                         f"Execution failed with {result.error_type or result.status}; "
@@ -244,21 +299,98 @@ def create_graph(
                     )
                 )
             ],
-        }
+        )
 
     def route_after_detection(state: AgentState) -> Literal["reflect_and_heal", "__end__"]:
         return "reflect_and_heal" if state["status"] == "healing" else END
 
-    def reflect_and_heal_node(state: AgentState) -> dict[str, Any]:
-        return {
-            "retry_count": state["retry_count"] + 1,
-            "status": "coding",
-            "messages": [
+    def reflect_and_heal_node(state: AgentState) -> AgentState:
+        retry_count = state["retry_count"] + 1
+        artifacts = list(state["execution_artifacts"])
+
+        if not artifacts:
+            return transition(
+                state,
+                {"retry_count": retry_count, "status": "coding"},
+                messages=[
+                    AIMessage(
+                        content=f"Schema correction {retry_count} of {max_retries}."
+                    )
+                ],
+            )
+
+        latest_artifact = artifacts[-1]
+        result = PythonExecutionOutput.model_validate(latest_artifact["result"])
+        traceback_text = (
+            state["error_stack"][-1]
+            if state["error_stack"]
+            else result.traceback
+            or f"{result.error_type or 'SandboxError'}: {result.error_message or result.status}"
+        )
+        failed_code = str(latest_artifact["request"]["code"])
+        try:
+            reflection = dependencies["reflector"].reflect(failed_code, traceback_text)
+        except Exception as exc:
+            reflection_error = f"Reflector failed: {type(exc).__name__}: {exc}"
+            return transition(
+                state,
+                {
+                    "retry_count": retry_count,
+                    "error_stack": [*state["error_stack"], reflection_error],
+                    "status": "coding",
+                    "final_output": reflection_error,
+                },
+                messages=[
+                    AIMessage(
+                        content=(
+                            f"Targeted patch failed validation on correction {retry_count}; "
+                            "falling back to schema-constrained regeneration."
+                        )
+                    )
+                ],
+            )
+
+        latest_artifact = {
+            **latest_artifact,
+            "reflection": reflection.model_dump(mode="json"),
+        }
+        artifacts[-1] = latest_artifact
+        patch_record = {
+            "attempt": retry_count,
+            "root_cause": reflection.patch.root_cause,
+            "edits": [
+                edit.model_dump(mode="json") for edit in reflection.patch.edits
+            ],
+            "unified_diff": reflection.unified_diff,
+        }
+        return transition(
+            state,
+            {
+                "retry_count": retry_count,
+                "execution_artifacts": artifacts,
+                "patch_history": [*state["patch_history"], patch_record],
+                "generated_code": reflection.patched_code,
+                "code_summary": f"Targeted patch: {reflection.patch.root_cause}",
+                "status": "executing",
+            },
+            messages=[
                 AIMessage(
-                    content=f"Correction attempt {state['retry_count'] + 1} of {max_retries}."
+                    content=(
+                        f"Applied targeted correction {retry_count} of {max_retries}: "
+                        f"{reflection.patch.root_cause}"
+                    )
                 )
             ],
-        }
+        )
+
+    def route_after_reflection(
+        state: AgentState,
+    ) -> Literal["sandbox_executor", "coder_agent", "__end__"]:
+        if state["status"] == "executing":
+            return "sandbox_executor"
+        if state["status"] == "coding":
+            return "coder_agent"
+        return END
 
     builder = StateGraph(AgentState)
     builder.add_node("planner", planner_node)
@@ -284,7 +416,15 @@ def create_graph(
         route_after_detection,
         {"reflect_and_heal": "reflect_and_heal", END: END},
     )
-    builder.add_edge("reflect_and_heal", "coder_agent")
+    builder.add_conditional_edges(
+        "reflect_and_heal",
+        route_after_reflection,
+        {
+            "sandbox_executor": "sandbox_executor",
+            "coder_agent": "coder_agent",
+            END: END,
+        },
+    )
     return builder.compile()
 
 
