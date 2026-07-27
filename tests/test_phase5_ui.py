@@ -6,6 +6,7 @@ import base64
 import os
 from typing import Any
 
+import docker
 import pytest
 from streamlit.testing.v1 import AppTest
 
@@ -18,9 +19,11 @@ from src.agent.tools import (  # noqa: E402
     PlanStep,
 )
 from src.sandbox.test_sandbox import SandboxResult  # noqa: E402
+from src.ui import dashboard as dashboard_module  # noqa: E402
 from src.ui.dashboard import (  # noqa: E402
     AgentRunController,
     RunEvent,
+    RunSnapshot,
     build_graph_html,
     build_metrics_figure,
     extract_artifacts,
@@ -179,15 +182,103 @@ def test_streamlit_app_boots_without_starting_an_agent() -> None:
     assert app.button[0].label == "Launch TraceMind"
 
 
+def test_streaming_dashboard_assigns_a_unique_plotly_key_per_render(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Placeholder:
+        def container(self) -> "Placeholder":
+            return self
+
+        def __enter__(self) -> "Placeholder":
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            return None
+
+    keys: list[str] = []
+    monkeypatch.setattr(dashboard_module.st, "markdown", lambda *args, **kwargs: None)
+    monkeypatch.setattr(dashboard_module.st, "iframe", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        dashboard_module.st,
+        "plotly_chart",
+        lambda *args, **kwargs: keys.append(kwargs["key"]),
+    )
+    snapshot = RunSnapshot(
+        run_id="phase-5-regression",
+        status="running",
+    )
+
+    dashboard_module._render_right(
+        Placeholder(),
+        snapshot,
+        render_iteration=0,
+    )
+    dashboard_module._render_right(
+        Placeholder(),
+        snapshot,
+        render_iteration=1,
+    )
+
+    assert keys == [
+        "dashboard-context-telemetry-phase-5-regression-0",
+        "dashboard-context-telemetry-phase-5-regression-1",
+    ]
+    assert len(keys) == len(set(keys))
+
+
+def test_failed_error_detector_event_never_claims_execution_passed() -> None:
+    summary = dashboard_module._event_summary(
+        "error_detector",
+        {
+            "status": "failed",
+            "error_stack": [
+                "Attempt 4: Traceback\n"
+                "SyntaxError: unterminated string literal (detected at line 8)"
+            ],
+        },
+    )
+
+    assert summary.startswith("Retry limit reached; execution failed:")
+    assert "SyntaxError: unterminated string literal" in summary
+    assert "passed" not in summary.lower()
+
+
+def test_controller_displays_clean_terminal_failure_instead_of_error_list() -> None:
+    class FailedGraph:
+        def stream(self, *args: object, **kwargs: object):
+            yield {
+                "type": "updates",
+                "data": {
+                    "error_detector": {
+                        "status": "failed",
+                        "retry_count": 3,
+                        "error_stack": ["internal diagnostic", "terminal failure"],
+                        "final_output": "Healing exhausted.\n\nSyntaxError: broken SVG",
+                        "execution_artifacts": [],
+                    }
+                },
+            }
+
+    controller = AgentRunController(max_workers=1)
+    try:
+        run_id = controller.start(
+            PROMPT,
+            graph_factory=FailedGraph,
+        )
+        snapshot = controller.wait(run_id, timeout=5)
+    finally:
+        controller.shutdown()
+
+    assert snapshot.status == "failed"
+    assert snapshot.error == "Healing exhausted.\n\nSyntaxError: broken SVG"
+    assert not snapshot.error.startswith("[")
+
+
 @pytest.mark.integration
 def test_async_dashboard_can_use_phase1_docker_binding() -> None:
-    docker = pytest.importorskip("docker")
-    try:
-        client = docker.from_env()
-        client.ping()
-        client.images.get("python:3.12-slim")
-    except docker.errors.DockerException:
-        pytest.skip("Docker daemon or python:3.12-slim image is unavailable")
+    client = docker.from_env()
+    client.ping()
+    client.images.get("python:3.12-slim")
 
     controller = AgentRunController(max_workers=1)
     try:

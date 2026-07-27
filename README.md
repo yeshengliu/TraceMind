@@ -26,7 +26,8 @@ coder, sandbox, error detector, and reflector are explicit LangGraph nodes.
 Every generated program runs inside an offline, read-only Docker container.
 When execution fails, TraceMind parses the real traceback, applies a minimal
 validated patch, prunes stale context, and tries again—with a visible retry
-limit.
+limit. The **LLM X-Ray Lab** adds prompt, token-probability, vector-retrieval,
+and estimated KV-cache inspection for local Ollama generation.
 
 ## Measured benchmark
 
@@ -70,6 +71,9 @@ flowchart LR
     Success --> Episodes["Episodic memory<br/>JSONL export"]
     Graph -. OpenInference spans .-> Phoenix["Local Phoenix tracing"]
     Graph -. live state updates .-> UI
+    UI --> XRay["LLM X-Ray Lab"]
+    XRay --> Logprobs["Token logprobs<br/>Top-5 + confidence"]
+    XRay --> Vectors["3D memory retrieval<br/>KV-cache estimate"]
 ```
 
 ## Why TraceMind
@@ -94,6 +98,71 @@ flowchart LR
   adds local OpenInference traces.
 - **Rigid tool contracts** — Pydantic schemas reject malformed model output and
   unsafe execution parameters before they cross the tool boundary.
+- **LLM X-Ray mode** — compare Temperature, Top-P, and Top-K settings against
+  the same prompt; replay Top-5 token probabilities; inspect a confidence
+  heatmap; diff raw versus injected prompts; explore local embeddings in 3D;
+  and watch estimated KV-cache pressure and context pruning.
+
+## LLM X-Ray Lab
+
+Open the **🔬 LLM X-Ray Lab** tab after starting Streamlit. The lab provides:
+
+### Phase 7 in motion
+
+**Concept guide, sampling controls, and inline help**
+
+<p align="center">
+  <img src="docs/assets/phase7-xray-guide.gif"
+       alt="LLM X-Ray Lab concept guide and sampling parameter help"
+       width="88%">
+</p>
+
+**Prompt metamorphosis and focus attribution**
+
+<p align="center">
+  <img src="docs/assets/phase7-prompt-focus.gif"
+       alt="Raw prompt versus injected system prompt, schema, memory, and focus attribution"
+       width="88%">
+</p>
+
+**Interactive 3D retrieval and KV-cache pressure**
+
+<p align="center">
+  <img src="docs/assets/phase7-vector-kv.gif"
+       alt="Rotating 3D memory retrieval graph and KV-cache gauge"
+       width="88%">
+</p>
+
+The vector demo above uses the lab's explicitly labeled deterministic offline
+vectors. After a successful A/B run, TraceMind requests local Ollama embeddings
+for the same interactive scene.
+
+- a streamed Top-5 candidate histogram from Ollama `logprobs` and
+  `top_logprobs`, plus a replay control for every observed token;
+- green/amber/red generated-token confidence highlighting based on the
+  model-reported selected-token probability;
+- a raw-versus-processed prompt diff containing system policy, the Pydantic
+  response schema, memory context, and the user prompt;
+- an explainable prompt-section alignment view. This is a lexical attribution
+  proxy—Ollama does not expose internal transformer attention tensors;
+- a PCA-projected Plotly 3D memory scene connected to the Top-K cosine nearest
+  neighbors returned by local embeddings;
+- a transparent KV-cache estimate using
+  `2 × layers × KV heads × head dimension × tokens × dtype bytes`, including
+  a pruning animation when the configured context window is exceeded; and
+- side-by-side A/B sampling controls for Temperature, Top-P, and Top-K.
+
+The lab never fabricates missing probability metadata. Older Ollama/model
+combinations that omit logprobs show a capability notice. If the configured
+embedding model is unavailable, the vector panel is explicitly labeled as a
+deterministic synthetic demo; install the embedding model with:
+
+```bash
+ollama pull nomic-embed-text
+```
+
+TraceMind displays observable model output and bounded rationale, not private
+hidden chain-of-thought.
 
 ## Quickstart
 
@@ -127,7 +196,7 @@ streamlit run app.py
 
 Open:
 
-- TraceMind dashboard: `http://localhost:8501`
+- TraceMind Agent Studio and LLM X-Ray Lab: `http://localhost:8501`
 - Phoenix traces: `http://localhost:6006`
 
 Phoenix is optional. The dashboard continues to work if the collector is
@@ -273,6 +342,7 @@ TraceMind/
 │   ├── agent/
 │   │   ├── graph.py               # LangGraph state machine
 │   │   ├── llm.py                 # Ollama model router
+│   │   ├── llm_inspector.py       # Prompt + native logprob/embed hooks
 │   │   ├── reflection.py          # Traceback parser + patch gate
 │   │   └── tools.py               # Pydantic tool contracts
 │   ├── eval/benchmark.py          # Dual-mode benchmark runner
@@ -280,7 +350,10 @@ TraceMind/
 │   ├── sandbox/test_sandbox.py    # Docker isolation boundary
 │   └── ui/
 │       ├── dashboard.py           # Animated dashboard
-│       └── tracing.py             # Phoenix/OpenInference setup
+│       ├── token_vis.py           # Probability, confidence, and prompt views
+│       ├── tracing.py             # Phoenix/OpenInference setup
+│       ├── vector_3d.py           # 3D retrieval + KV-cache visualization
+│       └── xray_tab.py            # Interactive Phase 7 lab
 └── tests/                         # Unit, integration, Docker, and UI tests
 ```
 
@@ -291,6 +364,8 @@ TraceMind/
 | `TRACEMIND_OLLAMA_BASE_URL` | `http://localhost:11434/v1` | Ollama-compatible API |
 | `TRACEMIND_PLANNER_MODEL` | `qwen2.5:7b` | Planning and optional judging |
 | `TRACEMIND_CODER_MODEL` | `qwen2.5-coder:7b` | Code generation and reflection |
+| `TRACEMIND_EMBEDDING_MODEL` | `nomic-embed-text` | X-Ray local memory embeddings |
+| `TRACEMIND_OLLAMA_NATIVE_URL` | derived from base URL | Native chat/embed API override |
 | `TRACEMIND_LLM_TIMEOUT_SECONDS` | `120` | Local model request timeout |
 | `TRACEMIND_PHOENIX_URL` | `http://localhost:6006` | Phoenix UI/collector |
 | `TRACEMIND_PHOENIX_PROJECT` | `TraceMind` | Trace project name |
@@ -300,11 +375,12 @@ TraceMind/
 
 ```bash
 pytest -q
-TRACEMIND_RUN_OLLAMA_TESTS=1 pytest -m ollama -q
 ```
 
-The normal suite uses deterministic structured-model doubles and the real
-Docker sandbox. Live Ollama tests are opt-in so CI remains reproducible.
+The suite runs deterministic model doubles, the real Docker sandbox, and live
+local Ollama tests. Docker Desktop, `python:3.12-slim`, and both configured Qwen
+models must be available; missing integration infrastructure fails verification
+instead of silently skipping coverage.
 
 ## Security boundary
 

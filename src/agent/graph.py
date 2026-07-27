@@ -31,7 +31,11 @@ DEFAULT_MAX_RETRIES = 3
 PLANNER_SYSTEM_PROMPT = """\
 You are TraceMind's planning node. Convert the user request into a small,
 ordered implementation plan for a Python program. Every step must be observable
-and testable. Return only data matching the supplied JSON schema.
+and testable. The program runs in an offline container with only the Python
+standard library. Never plan third-party imports, GUI display, network access,
+or exponential brute-force algorithms. Prefer efficient iterative algorithms
+and dependency-free SVG or ASCII output for charts. Return only data matching
+the supplied JSON schema.
 """
 
 CODER_SYSTEM_PROMPT = """\
@@ -41,11 +45,13 @@ container with only the Python standard library installed. Never import
 matplotlib, numpy, pandas, seaborn, plotly, or any other third-party package.
 For charts, generate and print a literal SVG string or an ASCII chart; do not
 open a GUI or depend on a file surviving the container. Print every requested
-result or artifact to stdout. Prefer SVG for charts. If using ASCII, build a
-list of lines and print each line; do not embed escaped newlines inside quoted
-Python string literals. Do not access the network, spawn processes, or read
-host files. Use a timeout_seconds value from 0.1 through 30 inclusive. Return
-only data matching the supplied JSON schema.
+result or artifact to stdout. Prefer SVG for charts. Use triple-quoted Python
+strings for multiline SVG templates; never split a single- or double-quoted
+string literal across physical lines. If using ASCII, build a list of lines and
+print each line. The complete program must pass ast.parse before you return it.
+Do not access the network, spawn processes, or read host files. Use a
+timeout_seconds value from 0.1 through 30 inclusive. Return only data matching
+the supplied JSON schema.
 """
 
 REGENERATION_FALLBACK_PROMPT = f"""\
@@ -130,6 +136,19 @@ def _artifact_error(artifact: dict[str, Any]) -> str:
     return f"Attempt {artifact['attempt']}: {details}"
 
 
+def _latest_runtime_error(state: AgentState) -> str | None:
+    artifacts = state.get("execution_artifacts") or []
+    if not artifacts:
+        return None
+    result = artifacts[-1].get("result", {})
+    return str(
+        result.get("traceback")
+        or result.get("error_message")
+        or result.get("status")
+        or ""
+    ) or None
+
+
 def create_graph(
     *,
     planner: StructuredModel | None = None,
@@ -189,12 +208,22 @@ def create_graph(
 
     def coder_node(state: AgentState) -> AgentState:
         request = _latest_user_text(state["messages"])
+        runtime_error = _latest_runtime_error(state)
         context = {
             "user_request": request,
             "plan": state["current_plan"],
             "retry_count": state["retry_count"],
-            "latest_error": state["error_stack"][-1] if state["error_stack"] else None,
+            "latest_error": (
+                runtime_error
+                or (state["error_stack"][-1] if state["error_stack"] else None)
+            ),
             "failed_code": state.get("generated_code") if state["error_stack"] else None,
+            "regeneration_requirement": (
+                "Return syntactically valid Python that materially changes the "
+                "failed block and passes ast.parse."
+                if state["error_stack"]
+                else None
+            ),
         }
         system_prompt = (
             REGENERATION_FALLBACK_PROMPT
@@ -229,6 +258,42 @@ def create_graph(
                 ],
             )
         assert isinstance(generated, CodeGenerationOutput)
+        previous_code = state.get("generated_code")
+        if (
+            state["error_stack"]
+            and previous_code
+            and generated.code.strip() == previous_code.strip()
+        ):
+            exhausted = state["retry_count"] >= dependencies["max_retries"]
+            stalled_error = (
+                "Healing failed after the retry limit because fallback regeneration "
+                "kept returning unchanged code."
+                if exhausted
+                else "Fallback regeneration returned unchanged code; retrying repair "
+                "without re-running the same sandbox failure."
+            )
+            unresolved_error = runtime_error or state["error_stack"][-1]
+            return transition(
+                state,
+                {
+                    "error_stack": [*state["error_stack"], stalled_error],
+                    "status": "failed" if exhausted else "healing",
+                    "final_output": f"{stalled_error}\n\n{unresolved_error}",
+                },
+                messages=[
+                    AIMessage(
+                        content=(
+                            "Fallback regeneration made no code change; "
+                            + (
+                                "retry limit reached."
+                                if exhausted
+                                else "requesting another bounded repair without "
+                                "re-running unchanged code."
+                            )
+                        )
+                    )
+                ],
+            )
         return transition(
             state,
             {
@@ -322,10 +387,11 @@ def create_graph(
         latest_artifact = artifacts[-1]
         result = PythonExecutionOutput.model_validate(latest_artifact["result"])
         traceback_text = (
-            state["error_stack"][-1]
-            if state["error_stack"]
-            else result.traceback
-            or f"{result.error_type or 'SandboxError'}: {result.error_message or result.status}"
+            result.traceback
+            or (
+                f"{result.error_type or 'SandboxError'}: "
+                f"{result.error_message or result.status}"
+            )
         )
         failed_code = str(latest_artifact["request"]["code"])
         try:

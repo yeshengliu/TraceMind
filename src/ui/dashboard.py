@@ -216,8 +216,15 @@ class AgentRunController:
                 )
                 record.active_node = None
                 if record.status == "failed":
-                    record.error = (
-                        str(latest_state.get("error_stack") or "Agent run failed.")
+                    final_output = latest_state.get("final_output")
+                    errors = latest_state.get("error_stack")
+                    latest_error = (
+                        errors[-1]
+                        if isinstance(errors, list) and errors
+                        else errors
+                    )
+                    record.error = str(
+                        final_output or latest_error or "Agent run failed."
                     )
         except Exception as exc:
             failure_state = {"status": "failed", "error_stack": str(exc)}
@@ -333,6 +340,9 @@ def _event_summary(node: str, state: dict[str, Any]) -> str:
             return plan
         return f"Prepared {len(plan)} executable plan step(s)."
     if node == "coder_agent":
+        if state.get("status") == "failed":
+            failure = str(state.get("final_output") or "Code healing failed.")
+            return failure.strip().splitlines()[0]
         code = str(state.get("generated_code") or "")
         lines = len(code.splitlines())
         return f"Generated a focused Python program ({lines} line(s))."
@@ -343,12 +353,17 @@ def _event_summary(node: str, state: dict[str, Any]) -> str:
         exit_code = result.get("exit_code", "?")
         return f"Sandbox execution finished with exit code {exit_code}."
     if node == "error_detector":
-        if state.get("status") == "healing" and state.get("error_stack"):
+        status = state.get("status")
+        if status in {"healing", "failed"} and state.get("error_stack"):
             errors = state["error_stack"]
             latest_error = errors[-1] if isinstance(errors, list) else errors
             first_error = str(latest_error).strip().splitlines()[-1]
+            if status == "failed":
+                return f"Retry limit reached; execution failed: {first_error}"
             return f"Runtime failure detected: {first_error}"
-        return "Execution passed error and traceback checks."
+        if status == "completed":
+            return "Execution passed error and traceback checks."
+        return f"Execution check ended in unexpected state: {status or 'unknown'}."
     if node == "reflect_and_heal":
         patches = state.get("patch_history") or []
         latest = patches[-1] if patches else {}
@@ -587,19 +602,21 @@ def _controller_resource() -> AgentRunController:
 
 def render_dashboard(
     *,
+    configure_page: bool = True,
     default_prompt: str | None = None,
     graph_factory: DashboardGraphFactory | None = None,
     auto_launch: bool = False,
     scenario_note: str | None = None,
     artifact_first: bool = False,
 ) -> None:
-    """Render the Streamlit experience, optionally with a recording scenario."""
-    st.set_page_config(
-        page_title="TraceMind · Agent Observatory",
-        page_icon="◈",
-        layout="wide",
-        initial_sidebar_state="expanded",
-    )
+    """Render Agent Studio standalone, embedded, or as a recording scenario."""
+    if configure_page:
+        st.set_page_config(
+            page_title="TraceMind · Agent Observatory",
+            page_icon="◈",
+            layout="wide",
+            initial_sidebar_state="expanded",
+        )
     st.markdown(_DASHBOARD_CSS, unsafe_allow_html=True)
 
     tracing = setup_tracing()
@@ -619,7 +636,13 @@ def render_dashboard(
         unsafe_allow_html=True,
     )
 
-    with st.sidebar:
+    control_surface = (
+        st.sidebar
+        if configure_page
+        else st.expander("Agent Studio controls & telemetry", expanded=False)
+    )
+    launch = False
+    with control_surface:
         st.markdown("### Mission control")
         prompt = st.text_area(
             "Agent task",
@@ -633,11 +656,12 @@ def render_dashboard(
         max_retries = st.slider("Maximum healing attempts", 1, 5, 3)
         if scenario_note:
             st.info(scenario_note)
-        launch = st.button(
-            "Launch TraceMind",
-            type="primary",
-            width="stretch",
-        )
+        if configure_page:
+            launch = st.button(
+                "Launch TraceMind",
+                type="primary",
+                width="stretch",
+            )
         st.divider()
         st.markdown("#### Phoenix telemetry")
         if tracing.collector_online:
@@ -653,6 +677,13 @@ def render_dashboard(
         else:
             st.info("Tracing disabled with TRACEMIND_TRACING_ENABLED=0.")
         st.caption("Observable rationale is shown; hidden chain-of-thought is not.")
+
+    if not configure_page:
+        launch = st.button(
+            "Launch TraceMind",
+            type="primary",
+            width="stretch",
+        )
 
     should_auto_launch = (
         auto_launch
@@ -684,15 +715,18 @@ def render_dashboard(
     left_column, right_column = st.columns([0.88, 1.12], gap="large")
     left_placeholder = left_column.empty()
     right_placeholder = right_column.empty()
+    render_iteration = 0
 
     while snapshot.status in RUNNING_STATES:
         _render_left(left_placeholder, snapshot)
         _render_right(
             right_placeholder,
             snapshot,
+            render_iteration=render_iteration,
             artifact_first=artifact_first,
-            show_metrics=False,
+            show_metrics=not artifact_first,
         )
+        render_iteration += 1
         time.sleep(0.15)
         snapshot = controller.snapshot(run_id)
 
@@ -700,6 +734,7 @@ def render_dashboard(
     _render_right(
         right_placeholder,
         snapshot,
+        render_iteration=render_iteration,
         artifact_first=artifact_first,
         show_metrics=not artifact_first,
     )
@@ -719,7 +754,7 @@ def _render_empty_dashboard() -> None:
             build_metrics_figure([]),
             width="stretch",
             config={"displayModeBar": False},
-            key="tracemind-empty-metrics",
+            key="dashboard-empty-context-telemetry",
         )
 
 
@@ -793,6 +828,7 @@ def _render_right(
     placeholder: Any,
     snapshot: RunSnapshot,
     *,
+    render_iteration: int,
     artifact_first: bool = False,
     show_metrics: bool = True,
 ) -> None:
@@ -811,7 +847,10 @@ def _render_right(
                 build_metrics_figure(snapshot.events),
                 width="stretch",
                 config={"displayModeBar": False},
-                key=f"tracemind-metrics-{snapshot.run_id}",
+                key=(
+                    f"dashboard-context-telemetry-{snapshot.run_id}-"
+                    f"{render_iteration}"
+                ),
             )
         if not artifact_first or not extract_artifacts(_latest_stdout(state)):
             _render_execution_output(state)
@@ -843,9 +882,15 @@ def _render_execution_output(state: dict[str, Any]) -> None:
         or result.get("error_message")
         or ""
     )
-    rendered = extract_artifacts(stdout)
+    succeeded = result.get("status") == "success"
+    rendered = extract_artifacts(stdout) if succeeded else []
 
-    st.markdown("### Sandbox artifacts")
+    st.markdown("### Sandbox artifacts" if succeeded else "### Failed sandbox attempt")
+    if not succeeded:
+        st.error(
+            "No successful artifact was produced. The terminal below contains "
+            "the final sandbox failure."
+        )
     for artifact in rendered:
         st.caption(artifact.title)
         if artifact.kind == "svg":
@@ -862,7 +907,7 @@ def _render_execution_output(state: dict[str, Any]) -> None:
         else:
             st.json(artifact.content)
 
-    with st.expander("Live terminal", expanded=not rendered):
+    with st.expander("Live terminal", expanded=not succeeded or not rendered):
         st.code(stdout or "(no stdout)", language="text")
         if stderr:
             st.code(stderr, language="text")
