@@ -98,6 +98,7 @@ class _RunRecord:
 
 
 GraphFactory = Callable[[], Any]
+DashboardGraphFactory = Callable[[int], Any]
 
 
 class AgentRunController:
@@ -599,8 +600,16 @@ def _controller_resource() -> AgentRunController:
     return AgentRunController()
 
 
-def render_dashboard(*, configure_page: bool = True) -> None:
-    """Render the Agent Studio, standalone or inside the Phase 7 tab shell."""
+def render_dashboard(
+    *,
+    configure_page: bool = True,
+    default_prompt: str | None = None,
+    graph_factory: DashboardGraphFactory | None = None,
+    auto_launch: bool = False,
+    scenario_note: str | None = None,
+    artifact_first: bool = False,
+) -> None:
+    """Render Agent Studio standalone, embedded, or as a recording scenario."""
     if configure_page:
         st.set_page_config(
             page_title="TraceMind · Agent Observatory",
@@ -632,17 +641,27 @@ def render_dashboard(*, configure_page: bool = True) -> None:
         if configure_page
         else st.expander("Agent Studio controls & telemetry", expanded=False)
     )
+    launch = False
     with control_surface:
         st.markdown("### Mission control")
         prompt = st.text_area(
             "Agent task",
-            value=(
+            value=default_prompt
+            or (
                 "Calculate the 50th Fibonacci number and produce an SVG trend "
                 "chart for the first 50 values."
             ),
             height=150,
         )
         max_retries = st.slider("Maximum healing attempts", 1, 5, 3)
+        if scenario_note:
+            st.info(scenario_note)
+        if configure_page:
+            launch = st.button(
+                "Launch TraceMind",
+                type="primary",
+                width="stretch",
+            )
         st.divider()
         st.markdown("#### Phoenix telemetry")
         if tracing.collector_online:
@@ -659,22 +678,33 @@ def render_dashboard(*, configure_page: bool = True) -> None:
             st.info("Tracing disabled with TRACEMIND_TRACING_ENABLED=0.")
         st.caption("Observable rationale is shown; hidden chain-of-thought is not.")
 
-    launch = st.button(
-        "Launch TraceMind",
-        type="primary",
-        width="stretch",
-    )
+    if not configure_page:
+        launch = st.button(
+            "Launch TraceMind",
+            type="primary",
+            width="stretch",
+        )
 
-    if launch:
+    should_auto_launch = (
+        auto_launch
+        and "tracemind_run_id" not in st.session_state
+        and not st.session_state.get("tracemind_auto_launch_started", False)
+    )
+    if launch or should_auto_launch:
         try:
+            selected_graph_factory = graph_factory or (
+                lambda retries: create_graph(max_retries=retries)
+            )
             run_id = controller.start(
                 prompt,
-                graph_factory=lambda: create_graph(max_retries=max_retries),
+                graph_factory=lambda: selected_graph_factory(max_retries),
             )
         except ValueError as exc:
             st.error(str(exc))
         else:
             st.session_state["tracemind_run_id"] = run_id
+            if should_auto_launch:
+                st.session_state["tracemind_auto_launch_started"] = True
 
     run_id = st.session_state.get("tracemind_run_id")
     if not run_id:
@@ -693,6 +723,8 @@ def render_dashboard(*, configure_page: bool = True) -> None:
             right_placeholder,
             snapshot,
             render_iteration=render_iteration,
+            artifact_first=artifact_first,
+            show_metrics=not artifact_first,
         )
         render_iteration += 1
         time.sleep(0.15)
@@ -703,6 +735,8 @@ def render_dashboard(*, configure_page: bool = True) -> None:
         right_placeholder,
         snapshot,
         render_iteration=render_iteration,
+        artifact_first=artifact_first,
+        show_metrics=not artifact_first,
     )
 
 
@@ -795,28 +829,43 @@ def _render_right(
     snapshot: RunSnapshot,
     *,
     render_iteration: int,
+    artifact_first: bool = False,
+    show_metrics: bool = True,
 ) -> None:
     with placeholder.container():
+        state = snapshot.final_state or _latest_state(snapshot)
+        if artifact_first and extract_artifacts(_latest_stdout(state)):
+            _render_execution_output(state)
         st.markdown("### Live state topology")
         st.iframe(
             build_graph_html(snapshot.events, snapshot.active_node),
             height=410,
         )
-        st.markdown("### Context telemetry")
-        st.plotly_chart(
-            build_metrics_figure(snapshot.events),
-            width="stretch",
-            config={"displayModeBar": False},
-            key=(
-                f"dashboard-context-telemetry-{snapshot.run_id}-"
-                f"{render_iteration}"
-            ),
-        )
-        _render_execution_output(snapshot.final_state or _latest_state(snapshot))
+        if show_metrics:
+            st.markdown("### Context telemetry")
+            st.plotly_chart(
+                build_metrics_figure(snapshot.events),
+                width="stretch",
+                config={"displayModeBar": False},
+                key=(
+                    f"dashboard-context-telemetry-{snapshot.run_id}-"
+                    f"{render_iteration}"
+                ),
+            )
+        if not artifact_first or not extract_artifacts(_latest_stdout(state)):
+            _render_execution_output(state)
 
 
 def _latest_state(snapshot: RunSnapshot) -> dict[str, Any]:
     return snapshot.events[-1].state if snapshot.events else {}
+
+
+def _latest_stdout(state: dict[str, Any]) -> str:
+    artifacts = state.get("execution_artifacts") or []
+    if not artifacts or not isinstance(artifacts[-1], dict):
+        return ""
+    result = artifacts[-1].get("result", {})
+    return str(result.get("logs") or "") if isinstance(result, dict) else ""
 
 
 def _render_execution_output(state: dict[str, Any]) -> None:
@@ -844,7 +893,14 @@ def _render_execution_output(state: dict[str, Any]) -> None:
         )
     for artifact in rendered:
         st.caption(artifact.title)
-        if artifact.kind in {"svg", "png"}:
+        if artifact.kind == "svg":
+            # Render in Streamlit's isolated component iframe so an SVG can be
+            # displayed without granting it access to the parent dashboard.
+            st.iframe(
+                str(artifact.content),
+                height=330,
+            )
+        elif artifact.kind == "png":
             st.image(artifact.content, width="stretch")
         elif artifact.kind == "markdown":
             st.markdown(str(artifact.content))

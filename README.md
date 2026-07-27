@@ -1,6 +1,12 @@
 <div align="center">
   <img src="docs/assets/tracemind-hero.svg" alt="TraceMind — transparent, local, self-healing agents" width="100%">
 
+  <p align="center">
+  <img src="docs/hero_demo.gif" alt="TraceMind Self-Healing Agent Demo" width="100%">
+  </p>
+
+  <p><sub><strong>Query → Plan → Fail → Heal:</strong> TraceMind plans the sales analysis, surfaces a red Docker <code>KeyError</code>, applies a traceback-guided repair, then turns the node green and renders the profit trend.</sub></p>
+
   <p><strong>A local-first Python agent that plans visibly, executes in Docker, reads its own tracebacks, and repairs failed code.</strong></p>
 
   <p>
@@ -269,14 +275,67 @@ ARTIFACT_JSON={"value": 42}
 SVG and PNG images, Markdown reports, JSON data, and raw terminal logs appear in
 the right-hand dashboard pane.
 
+## Record the hero demo
+
+Start Docker Desktop, make sure the sandbox image and local coder model are
+available, then launch the auto-running recording scenario:
+
+```bash
+docker compose pull sandbox
+ollama pull qwen2.5-coder:7b
+python scripts/run_demo_scenario.py
+```
+
+The fixed plan, data, initial program, and model seed make the capture
+repeatable. The first execution raises `KeyError: 'profit_margin'` in the real
+Docker sandbox; the traceback is routed to `qwen2.5-coder:7b`, the validated
+patch is re-executed, and the right pane renders a dependency-free SVG trend
+chart. For an offline framing rehearsal, use
+`python scripts/run_demo_scenario.py --fixture-reflector`.
+
+In Kap or CleanShot X, select only the browser window, record at **1920×1080 and
+30 fps**, hide the cursor, and stop just after the green chart appears
+(approximately 10–15 seconds). Export the source recording to
+`/tmp/tracemind-hero.mov`, then create the README asset:
+
+```bash
+brew install ffmpeg gifsicle
+mkdir -p docs
+ffmpeg -y -i /tmp/tracemind-hero.mov -t 15 \
+  -vf "fps=15,scale=1280:-2:flags=lanczos,split[s0][s1];[s0]palettegen=max_colors=128:stats_mode=diff[p];[s1][p]paletteuse=dither=bayer:bayer_scale=3:diff_mode=rectangle" \
+  -loop 0 docs/hero_demo.raw.gif
+gifsicle -O3 --lossy=80 --colors 128 \
+  -o docs/hero_demo.gif docs/hero_demo.raw.gif
+du -h docs/hero_demo.gif
+```
+
+If the GIF is still over 5 MB, use 10 fps and 960 px instead:
+
+```bash
+ffmpeg -y -i /tmp/tracemind-hero.mov -t 15 \
+  -vf "fps=10,scale=960:-2:flags=lanczos,split[s0][s1];[s0]palettegen=max_colors=96[p];[s1][p]paletteuse=dither=bayer:bayer_scale=4" \
+  -loop 0 docs/hero_demo.gif
+```
+
+For a sharper, usually much smaller MP4 alternative:
+
+```bash
+ffmpeg -y -i /tmp/tracemind-hero.mov -t 15 \
+  -vf "fps=30,scale=1920:-2:flags=lanczos" \
+  -c:v libx264 -preset slow -crf 28 -pix_fmt yuv420p \
+  -movflags +faststart -an docs/hero_demo.mp4
+```
+
 ## Project map
 
 ```text
 TraceMind/
 ├── app.py                         # Streamlit entry point
+├── scripts/run_demo_scenario.py   # Reproducible self-healing hero demo
 ├── data/benchmark.jsonl           # 18 reproducible edge cases
 ├── docs/
 │   ├── assets/tracemind-hero.svg  # Animated GitHub hero
+│   ├── hero_demo.gif              # Recorded README demo (generated locally)
 │   ├── benchmark_report.json      # Machine-readable measurements
 │   └── benchmark_report.md        # Human-readable results
 ├── src/
