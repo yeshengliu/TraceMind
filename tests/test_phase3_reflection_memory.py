@@ -149,6 +149,41 @@ def test_working_memory_preserves_policy_intent_and_latest_evidence() -> None:
     assert len(working.recent_messages) <= 2
 
 
+def test_pruner_truncation_makes_progress_for_large_single_artifact() -> None:
+    pruner = ContextPruner(
+        max_chars=1_200,
+        max_messages=2,
+        max_artifacts=1,
+        max_output_chars=400,
+    )
+    state = {
+        "messages": [HumanMessage(content="Keep the run bounded.")],
+        "current_plan": ["Execute"],
+        "error_stack": ["RuntimeError: synthetic"],
+        "retry_count": 1,
+        "execution_artifacts": [
+            {
+                "attempt": 1,
+                "request": {"code": "raise RuntimeError('synthetic')"},
+                "result": {
+                    "status": "error",
+                    "logs": "diagnostic\n" * 1_000,
+                    "traceback": "RuntimeError: synthetic",
+                },
+            }
+        ],
+        "patch_history": [],
+        "history_summary": [],
+        "final_output": "diagnostic\n" * 1_000,
+    }
+
+    pruned = pruner.prune_state(state)
+
+    assert len(pruned["execution_artifacts"][0]["result"]["logs"]) <= 256
+    assert len(pruned["final_output"]) <= pruner.max_output_chars
+    assert pruner.measure_state(pruned) <= pruner.max_chars
+
+
 @pytest.mark.integration
 def test_missing_column_self_corrects_with_targeted_patch_in_docker() -> None:
     if not _docker_is_ready():

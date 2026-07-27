@@ -1,0 +1,73 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="320" viewBox="0 0 1200 320" role="img" aria-labelledby="title desc">
+  <title id="title">TraceMind</title>
+  <desc id="desc">Transparent, local, self-healing agents shown as an animated execution path.</desc>
+  <defs>
+    <linearGradient id="background" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#050a12"/>
+      <stop offset="0.55" stop-color="#0b1628"/>
+      <stop offset="1" stop-color="#10152b"/>
+    </linearGradient>
+    <linearGradient id="titleGradient" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#38bdf8"/>
+      <stop offset="0.52" stop-color="#a78bfa"/>
+      <stop offset="1" stop-color="#10b981"/>
+    </linearGradient>
+    <filter id="glow" x="-100%" y="-100%" width="300%" height="300%">
+      <feGaussianBlur stdDeviation="7" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+    <style>
+      .path { stroke-dasharray: 8 10; animation: travel 2.6s linear infinite; }
+      .pulse { transform-box: fill-box; transform-origin: center; animation: pulse 2s ease-in-out infinite; }
+      .delay-1 { animation-delay: .35s; }
+      .delay-2 { animation-delay: .7s; }
+      .delay-3 { animation-delay: 1.05s; }
+      @keyframes travel { to { stroke-dashoffset: -36; } }
+      @keyframes pulse { 0%,100% { opacity: .55; transform: scale(.88); } 50% { opacity: 1; transform: scale(1.12); } }
+    </style>
+  </defs>
+  <rect width="1200" height="320" rx="28" fill="url(#background)"/>
+  <circle cx="1060" cy="30" r="220" fill="#38bdf8" opacity=".055"/>
+  <circle cx="160" cy="340" r="260" fill="#a78bfa" opacity=".06"/>
+  <g opacity=".2" stroke="#334155">
+    <path d="M0 64H1200M0 128H1200M0 192H1200M0 256H1200"/>
+    <path d="M100 0V320M300 0V320M500 0V320M700 0V320M900 0V320M1100 0V320"/>
+  </g>
+  <g transform="translate(72 63)">
+    <path d="M34 7C18 7 7 18 7 34c0 10 5 18 13 23v17h28V57c8-5 13-13 13-23C61 18 50 7 34 7Z" fill="none" stroke="#38bdf8" stroke-width="5" filter="url(#glow)"/>
+    <path d="M21 34h26M34 20v28M24 74h20M27 84h14" stroke="#a78bfa" stroke-width="4" stroke-linecap="round"/>
+  </g>
+  <text x="170" y="130" fill="url(#titleGradient)" font-family="Inter,Arial,sans-serif" font-size="72" font-weight="800" letter-spacing="-3">TraceMind</text>
+  <text x="174" y="169" fill="#94a3b8" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" font-size="17" letter-spacing="2">TRANSPARENT · LOCAL · SELF-HEALING</text>
+  <g transform="translate(170 232)" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" font-size="12" text-anchor="middle">
+    <path class="path" d="M30 0H840" stroke="#475569" stroke-width="2" fill="none"/>
+    <g class="pulse">
+      <circle cx="30" cy="0" r="11" fill="#38bdf8" filter="url(#glow)"/>
+      <text x="30" y="33" fill="#cbd5e1">PLAN</text>
+    </g>
+    <g class="pulse delay-1">
+      <circle cx="230" cy="0" r="11" fill="#60a5fa" filter="url(#glow)"/>
+      <text x="230" y="33" fill="#cbd5e1">CODE</text>
+    </g>
+    <g class="pulse delay-2">
+      <circle cx="430" cy="0" r="11" fill="#f59e0b" filter="url(#glow)"/>
+      <text x="430" y="33" fill="#cbd5e1">SANDBOX</text>
+    </g>
+    <g class="pulse delay-3">
+      <circle cx="630" cy="0" r="11" fill="#a78bfa" filter="url(#glow)"/>
+      <text x="630" y="33" fill="#cbd5e1">HEAL</text>
+    </g>
+    <g class="pulse delay-2">
+      <circle cx="840" cy="0" r="11" fill="#10b981" filter="url(#glow)"/>
+      <text x="840" y="33" fill="#cbd5e1">SUCCEED</text>
+    </g>
+  </g>
+  <g transform="translate(1040 104)">
+    <circle cx="48" cy="48" r="43" fill="none" stroke="#10b981" stroke-width="3" opacity=".7"/>
+    <path d="m27 48 14 14 29-31" fill="none" stroke="#10b981" stroke-width="7" stroke-linecap="round" stroke-linejoin="round" filter="url(#glow)"/>
+    <text x="48" y="112" fill="#94a3b8" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" font-size="12" text-anchor="middle">18 / 18</text>
+  </g>
+</svg>

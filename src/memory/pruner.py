@@ -29,8 +29,13 @@ def _json_default(value: object) -> object:
 def _truncate(text: str, limit: int) -> str:
     if len(text) <= limit:
         return text
-    omitted = len(text) - limit
-    return f"{text[:limit]}\n... <{omitted} chars pruned>"
+    marker = ""
+    for _ in range(3):
+        retained = max(0, limit - len(marker))
+        omitted = len(text) - retained
+        marker = f"\n... <{omitted} chars pruned>"
+    retained = max(0, limit - len(marker))
+    return f"{text[:retained]}{marker}"[:limit]
 
 
 class WorkingMemory(BaseModel):
