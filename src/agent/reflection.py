@@ -24,7 +24,9 @@ occurrence. Preserve unrelated behavior. The sandbox is offline and contains
 only the Python standard library, so replace missing third-party packages with
 standard-library implementations. For SyntaxError, replace the complete
 malformed logical line or block and ensure the resulting program passes
-ast.parse. Return only the supplied JSON schema.
+ast.parse. Never reverse an edit: old_text is the broken text copied from
+failed_code, and new_text is its corrected replacement. Return only the
+supplied JSON schema.
 """
 
 _FRAME_PATTERN = re.compile(

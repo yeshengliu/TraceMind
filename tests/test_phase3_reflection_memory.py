@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import os
 import re
 from pathlib import Path
 from typing import Any
@@ -186,8 +185,7 @@ def test_pruner_truncation_makes_progress_for_large_single_artifact() -> None:
 
 @pytest.mark.integration
 def test_missing_column_self_corrects_with_targeted_patch_in_docker() -> None:
-    if not _docker_is_ready():
-        pytest.skip("Docker daemon or python:3.12-slim image is unavailable")
+    assert _docker_is_ready(), "Docker daemon and python:3.12-slim are required"
 
     episodic_memory = EpisodicMemory()
     app = create_graph(
@@ -313,9 +311,6 @@ def test_state_history_stays_bounded_after_four_healing_loops(tmp_path: Path) ->
 
 @pytest.mark.ollama
 def test_live_qwen_reflector_generates_applicable_keyerror_patch() -> None:
-    if os.getenv("TRACEMIND_RUN_OLLAMA_TESTS") != "1":
-        pytest.skip("Set TRACEMIND_RUN_OLLAMA_TESTS=1 to run local model integration")
-
     failed_code = (
         'records = [{"amount": 13}, {"amount": 21}]\n'
         'total = sum(row["missing_amount"] for row in records)\n'

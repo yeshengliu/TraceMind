@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 from typing import Any
 
 import docker
@@ -85,8 +84,7 @@ def _docker_is_ready() -> bool:
 
 @pytest.mark.integration
 def test_fibonacci_prompt_runs_through_graph_and_real_sandbox() -> None:
-    if not _docker_is_ready():
-        pytest.skip("Docker daemon or python:3.12-slim image is unavailable")
+    assert _docker_is_ready(), "Docker daemon and python:3.12-slim are required"
 
     app = create_graph(planner=StaticPlanner(), coder=StaticCoder())
     final_state: AgentState = app.invoke(initial_state(USER_PROMPT))
@@ -163,6 +161,35 @@ def test_retry_guardrail_stops_after_configured_corrections() -> None:
     assert "RuntimeError: still broken" in final_state["final_output"]
 
 
+def test_unchanged_fallback_code_retries_without_repeating_the_sandbox() -> None:
+    sandbox_calls = 0
+
+    class RejectingReflector:
+        def reflect(self, failed_code: str, traceback_text: str) -> ReflectionResult:
+            raise ValueError("patch did not pass syntax validation")
+
+    def counted_failure(code: str, *, timeout_seconds: float) -> SandboxResult:
+        nonlocal sandbox_calls
+        sandbox_calls += 1
+        return _always_fails(code, timeout_seconds=timeout_seconds)
+
+    app = create_graph(
+        planner=StaticPlanner(),
+        coder=AlwaysBrokenCoder(),
+        reflector=RejectingReflector(),
+        sandbox_runner=counted_failure,
+        max_retries=3,
+    )
+    final_state: AgentState = app.invoke(initial_state(USER_PROMPT))
+
+    assert final_state["status"] == "failed"
+    assert final_state["retry_count"] == 3
+    assert sandbox_calls == 1
+    assert len(final_state["execution_artifacts"]) == 1
+    assert "retry limit" in final_state["final_output"]
+    assert "RuntimeError: still broken" in final_state["final_output"]
+
+
 def test_tool_schema_rejects_unknown_fields_and_unsafe_timeout() -> None:
     with pytest.raises(ValidationError):
         PythonExecutionInput.model_validate(
@@ -217,10 +244,7 @@ def test_coder_schema_violation_enters_bounded_healing_loop() -> None:
 
 @pytest.mark.ollama
 def test_live_ollama_graph() -> None:
-    if os.getenv("TRACEMIND_RUN_OLLAMA_TESTS") != "1":
-        pytest.skip("Set TRACEMIND_RUN_OLLAMA_TESTS=1 to run local model integration")
-    if not _docker_is_ready():
-        pytest.skip("Docker daemon or python:3.12-slim image is unavailable")
+    assert _docker_is_ready(), "Docker daemon and python:3.12-slim are required"
 
     final_state: AgentState = create_graph().invoke(initial_state(USER_PROMPT))
     assert final_state["status"] == "completed", final_state["final_output"]
