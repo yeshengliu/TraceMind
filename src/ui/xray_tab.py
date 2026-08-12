@@ -20,6 +20,12 @@ from src.agent.llm_inspector import (
     capture_prompt,
 )
 from src.agent.tools import CodeGenerationOutput
+from src.ui.animations import (
+    render_kv_cache_animation_ui,
+    render_prompt_pipeline_animation_ui,
+    render_sampling_animation_ui,
+    render_vector_pulse_ui,
+)
 from src.ui.token_vis import (
     HIGH_CONFIDENCE_EXPLANATION,
     HIGH_ENTROPY_EXPLANATION,
@@ -611,10 +617,17 @@ def render_xray_tab(*, inspector: OllamaInspector | None = None) -> None:
         else []
     )
     traces = [GenerationTrace.model_validate(item) for item in stored_traces]
-    probability_tab, prompt_tab, memory_tab = st.tabs(
-        ["🎯 Token probabilities", "🧠 Prompt & focus", "🌌 Vector & KV cache"]
+    probability_tab, prompt_tab, memory_tab, anim_tab = st.tabs(
+        [
+            "🎯 Token probabilities",
+            "🧠 Prompt & focus",
+            "🌌 Vector & KV cache",
+            "🎬 Animated Concept Guides",
+        ]
     )
     with probability_tab:
+        with st.expander("🎬 Concept Guide · Temperature & Top-P Sampler", expanded=False):
+            render_sampling_animation_ui(key_prefix="prob_tab")
         if traces:
             trace_columns = st.columns(2)
             for index, trace in enumerate(traces[:2]):
@@ -623,14 +636,34 @@ def render_xray_tab(*, inspector: OllamaInspector | None = None) -> None:
         else:
             st.info("Run the A/B comparison to populate live Top-5 and confidence views.")
     with prompt_tab:
+        with st.expander("🎬 Concept Guide · Prompt Assembly Pipeline", expanded=False):
+            render_prompt_pipeline_animation_ui()
         _render_prompt_and_focus(capture, traces)
     with memory_tab:
+        with st.expander("🎬 Concept Guide · Radiating 3D Vector Search Pulse", expanded=False):
+            render_vector_pulse_ui(key_prefix="mem_tab")
+        with st.expander("🎬 Concept Guide · KV Cache & Memory Pruning Dynamics", expanded=False):
+            render_kv_cache_animation_ui(key_prefix="mem_tab")
         _render_memory_and_kv(
             active_inspector,
             prompt,
             traces,
             context_window=context_window,
         )
+    with anim_tab:
+        st.markdown("### 🎬 Interactive LLM Concept Animations")
+        st.caption(
+            "Explore real-time visual explanations of Sampling Temperature, KV Cache Pruning, "
+            "3D Vector Search Pulse, and Prompt Assembly Pipelines."
+        )
+        with st.expander("🎛️ Animated Temperature & Top-P Sampler", expanded=True):
+            render_sampling_animation_ui(key_prefix="anim_tab")
+        with st.expander("🧠 KV Cache & Memory Pruning Dynamics", expanded=False):
+            render_kv_cache_animation_ui(key_prefix="anim_tab")
+        with st.expander("🌌 Interactive 3D Vector Search Pulse", expanded=False):
+            render_vector_pulse_ui(key_prefix="anim_tab")
+        with st.expander("⚙️ Prompt Assembly Pipeline Animation", expanded=False):
+            render_prompt_pipeline_animation_ui()
 
 
 __all__ = ["render_xray_tab"]
