@@ -103,6 +103,53 @@ KeyError: 'missing'
     assert parsed.raw == traceback_text
 
 
+def test_parse_traceback_recognizes_exceptions_without_suffix_keywords() -> None:
+    parsed = parse_traceback(
+        "Traceback (most recent call last):\n"
+        '  File "<sandbox>", line 3, in <module>\n'
+        "    next(iterator)\n"
+        "StopIteration\n"
+    )
+
+    assert parsed.exception_type == "StopIteration"
+
+
+def test_pruner_preserves_terminal_exception_in_long_traceback() -> None:
+    pruner = ContextPruner(max_chars=2_000, max_output_chars=400)
+    long_traceback = "\n".join(
+        f'  File "<sandbox>", line {index}, in <module>\n    diagnostic_{index}()'
+        for index in range(1, 80)
+    ) + "\nKeyError: 'terminal-exception'"
+    state = {
+        "messages": [HumanMessage(content="Keep the run bounded.")],
+        "current_plan": ["Execute"],
+        "error_stack": ["RuntimeError: synthetic"],
+        "retry_count": 1,
+        "execution_artifacts": [
+            {
+                "attempt": 1,
+                "request": {"code": "raise KeyError('x')"},
+                "result": {
+                    "status": "error",
+                    "logs": "diagnostic\n" * 500,
+                    "traceback": long_traceback,
+                },
+            }
+        ],
+        "patch_history": [],
+        "history_summary": [],
+        "final_output": long_traceback,
+    }
+
+    pruned = pruner.prune_state(state)
+
+    traceback = pruned["execution_artifacts"][0]["result"]["traceback"]
+    assert "KeyError: 'terminal-exception'" in traceback
+    assert "chars pruned" in traceback
+    assert "KeyError: 'terminal-exception'" in pruned["final_output"]
+    assert pruner.measure_state(pruned) <= pruner.max_chars
+
+
 def test_patch_gate_rejects_a_syntax_error_before_sandbox_execution() -> None:
     patch = CodePatch(
         root_cause="The proposed replacement removes a closing quote.",
