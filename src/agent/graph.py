@@ -21,6 +21,7 @@ from src.agent.tools import (
     PythonExecutionOutput,
     SandboxRunner,
     execute_python,
+    validate_generated_code,
 )
 from src.memory.pruner import ContextPruner, EpisodicMemory
 from src.sandbox.test_sandbox import run_in_sandbox
@@ -191,10 +192,27 @@ def create_graph(
 
     def planner_node(state: AgentState) -> AgentState:
         request = _latest_user_text(state["messages"])
-        response = dependencies["planner"].invoke(
-            [SystemMessage(content=PLANNER_SYSTEM_PROMPT), HumanMessage(content=request)]
-        )
-        plan = _validate_response(PlanOutput, response)
+        try:
+            response = dependencies["planner"].invoke(
+                [
+                    SystemMessage(content=PLANNER_SYSTEM_PROMPT),
+                    HumanMessage(content=request),
+                ]
+            )
+            plan = _validate_response(PlanOutput, response)
+        except Exception as exc:
+            planner_error = f"Planner invocation failed: {type(exc).__name__}: {exc}"
+            return transition(
+                state,
+                {
+                    "error_stack": [*state["error_stack"], planner_error],
+                    "status": "failed",
+                    "final_output": planner_error,
+                },
+                messages=[
+                    AIMessage(content="Planning failed; the run cannot continue.")
+                ],
+            )
         assert isinstance(plan, PlanOutput)
         visible_plan = [
             f"{step.index}. {step.instruction} -> {step.expected_result}"
@@ -230,6 +248,8 @@ def create_graph(
             if state["error_stack"] and state.get("generated_code")
             else CODER_SYSTEM_PROMPT
         )
+        generated: CodeGenerationOutput | None = None
+        coder_error: str | None = None
         try:
             response = dependencies["coder"].invoke(
                 [
@@ -238,20 +258,26 @@ def create_graph(
                 ]
             )
             generated = _validate_response(CodeGenerationOutput, response)
-        except ValidationError as exc:
-            schema_error = f"Coder schema validation failed: {exc}"
+        except Exception as exc:
+            if isinstance(exc, ValidationError):
+                coder_error = f"Coder schema validation failed: {exc}"
+            else:
+                coder_error = f"Coder invocation failed: {type(exc).__name__}: {exc}"
+        if coder_error is None and generated is not None:
+            coder_error = validate_generated_code(generated.code)
+        if coder_error is not None:
             exhausted = state["retry_count"] >= dependencies["max_retries"]
             return transition(
                 state,
                 {
-                    "error_stack": [*state["error_stack"], schema_error],
+                    "error_stack": [*state["error_stack"], coder_error],
                     "status": "failed" if exhausted else "healing",
-                    "final_output": schema_error,
+                    "final_output": coder_error,
                 },
                 messages=[
                     AIMessage(
                         content=(
-                            "Coder output violated the tool schema; "
+                            "Coder failed; "
                             f"{'retry limit reached' if exhausted else 'requesting correction'}."
                         )
                     )
@@ -313,6 +339,11 @@ def create_graph(
         if state["status"] == "healing":
             return "reflect_and_heal"
         return END
+
+    def route_after_planning(
+        state: AgentState,
+    ) -> Literal["coder_agent", "__end__"]:
+        return "coder_agent" if state["status"] != "failed" else END
 
     def sandbox_executor_node(state: AgentState) -> AgentState:
         request = PythonExecutionInput(
@@ -466,7 +497,11 @@ def create_graph(
     builder.add_node("reflect_and_heal", reflect_and_heal_node)
 
     builder.add_edge(START, "planner")
-    builder.add_edge("planner", "coder_agent")
+    builder.add_conditional_edges(
+        "planner",
+        route_after_planning,
+        {"coder_agent": "coder_agent", END: END},
+    )
     builder.add_conditional_edges(
         "coder_agent",
         route_after_coding,

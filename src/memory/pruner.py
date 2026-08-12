@@ -27,15 +27,12 @@ def _json_default(value: object) -> object:
 
 
 def _truncate(text: str, limit: int) -> str:
+    """Keep the tail of long text so terminal exceptions and final output survive."""
     if len(text) <= limit:
         return text
-    marker = ""
-    for _ in range(3):
-        retained = max(0, limit - len(marker))
-        omitted = len(text) - retained
-        marker = f"\n... <{omitted} chars pruned>"
+    marker = f"\n... <{len(text) - limit} chars pruned>\n"
     retained = max(0, limit - len(marker))
-    return f"{text[:retained]}{marker}"[:limit]
+    return f"{marker}{text[-retained:]}"
 
 
 class WorkingMemory(BaseModel):

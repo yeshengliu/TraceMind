@@ -27,6 +27,7 @@ from src.ui.dashboard import (  # noqa: E402
     build_graph_html,
     build_metrics_figure,
     extract_artifacts,
+    _event_summary,
 )
 from src.ui.tracing import setup_tracing  # noqa: E402
 
@@ -110,6 +111,45 @@ def test_async_controller_streams_complete_graph_run() -> None:
     assert snapshot.final_state["observability"]["enabled"] is False
     assert all(event.context_chars > 0 for event in snapshot.events)
     assert controller.poll(run_id, after_sequence=2)[0].sequence == 3
+
+
+def test_controller_evicts_oldest_finished_runs() -> None:
+    controller = AgentRunController(max_workers=1, max_runs=2)
+    try:
+        first = controller.start(
+            PROMPT,
+            graph_factory=lambda: create_graph(
+                planner=DashboardPlanner(),
+                coder=DashboardCoder(),
+                sandbox_runner=dashboard_sandbox,
+            ),
+        )
+        second = controller.start(
+            PROMPT,
+            graph_factory=lambda: create_graph(
+                planner=DashboardPlanner(),
+                coder=DashboardCoder(),
+                sandbox_runner=dashboard_sandbox,
+            ),
+        )
+        controller.wait(first, timeout=10)
+        controller.wait(second, timeout=10)
+        third = controller.start(
+            PROMPT,
+            graph_factory=lambda: create_graph(
+                planner=DashboardPlanner(),
+                coder=DashboardCoder(),
+                sandbox_runner=dashboard_sandbox,
+            ),
+        )
+        controller.wait(third, timeout=10)
+
+        with pytest.raises(KeyError):
+            controller.snapshot(first)
+        assert controller.snapshot(second).run_id == second
+        assert controller.snapshot(third).run_id == third
+    finally:
+        controller.shutdown()
 
 
 def test_artifact_extractors_reject_invalid_images_and_keep_safe_types() -> None:

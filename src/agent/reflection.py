@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import builtins
 import difflib
 import json
 import re
@@ -37,6 +38,15 @@ _EXCEPTION_PATTERN = re.compile(
     r"^(?P<type>[A-Za-z_][\w.]*(?:Error|Exception|Interrupt|Exit))"
     r"(?:: (?P<message>.*))?$"
 )
+_ANY_EXCEPTION_PATTERN = re.compile(
+    r"^(?P<type>[A-Za-z_][\w.]*)(?:: (?P<message>.*))?$"
+)
+
+
+def _is_builtin_exception(name: str) -> bool:
+    """Return True when the dotted name resolves to a built-in exception class."""
+    candidate = getattr(builtins, name.rsplit(".", 1)[-1], None)
+    return isinstance(candidate, type) and issubclass(candidate, BaseException)
 
 
 class TracebackFrame(StrictModel):
@@ -116,10 +126,16 @@ def parse_traceback(traceback_text: str) -> ParsedTraceback:
     exception_type = "UnknownError"
     exception_message = ""
     for line in reversed(lines):
-        match = _EXCEPTION_PATTERN.match(line.strip())
-        if match:
-            exception_type = match.group("type")
-            exception_message = match.group("message") or ""
+        stripped = line.strip()
+        strict_match = _EXCEPTION_PATTERN.match(stripped)
+        generic_match = _ANY_EXCEPTION_PATTERN.match(stripped)
+        if strict_match is not None or (
+            generic_match is not None
+            and _is_builtin_exception(generic_match.group("type"))
+        ):
+            matched = strict_match or generic_match
+            exception_type = matched.group("type")
+            exception_message = matched.group("message") or ""
             break
 
     return ParsedTraceback(

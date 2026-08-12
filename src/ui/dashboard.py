@@ -104,13 +104,14 @@ DashboardGraphFactory = Callable[[int], Any]
 class AgentRunController:
     """Run a compiled TraceMind graph without blocking Streamlit rendering."""
 
-    def __init__(self, max_workers: int = 2) -> None:
+    def __init__(self, max_workers: int = 2, max_runs: int = 20) -> None:
         self._executor = ThreadPoolExecutor(
             max_workers=max_workers,
             thread_name_prefix="tracemind-ui",
         )
         self._runs: dict[str, _RunRecord] = {}
         self._runs_lock = threading.RLock()
+        self._max_runs = max_runs
         self._pruner = ContextPruner()
 
     def start(
@@ -127,6 +128,7 @@ class AgentRunController:
         record = _RunRecord(run_id=run_id)
         with self._runs_lock:
             self._runs[run_id] = record
+            self._evict_finished_runs()
         record.future = self._executor.submit(
             self._execute,
             record,
@@ -134,6 +136,18 @@ class AgentRunController:
             graph_factory,
         )
         return run_id
+
+    def _evict_finished_runs(self) -> None:
+        """Drop the oldest finished runs so long-lived sessions stay bounded."""
+        finished_ids = [
+            run_id
+            for run_id, candidate in self._runs.items()
+            if candidate.status in {"completed", "failed"}
+        ]
+        overflow = len(self._runs) - self._max_runs
+        if overflow > 0:
+            for run_id in finished_ids[:overflow]:
+                del self._runs[run_id]
 
     def snapshot(self, run_id: str) -> RunSnapshot:
         """Return the latest immutable snapshot for a run."""
@@ -385,7 +399,7 @@ def _next_node(node: str, state: dict[str, Any]) -> str | None:
     if node == "error_detector":
         return "reflect_and_heal" if state.get("status") == "healing" else None
     if node == "reflect_and_heal":
-        return "sandbox_executor"
+        return "coder_agent" if state.get("status") == "coding" else "sandbox_executor"
     return None
 
 

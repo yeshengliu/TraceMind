@@ -17,7 +17,7 @@ openinference-instrumentation-langchain>=0.1.50,<1
 numpy>=1.26,<3
 plotly>=6.0,<7
 pyvis>=0.3.2,<1
-streamlit>=1.40,<2
+streamlit>=1.46,<2
 streamlit-lottie>=0.0.5,<1
 
 # Development and verification

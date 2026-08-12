@@ -30,6 +30,23 @@ import traceback
 source = os.environ["TRACEMIND_SNIPPET"]
 try:
     exec(compile(source, "<sandbox>", "exec"), {"__name__": "__sandbox__"})
+except SystemExit as exc:
+    code = 0 if exc.code in (None, 0) else exc.code
+    if code == 0:
+        print(json.dumps({
+            "status": "success",
+            "error_type": None,
+            "error_message": None,
+            "traceback": None,
+        }))
+    else:
+        print(json.dumps({
+            "status": "error",
+            "error_type": "SystemExit",
+            "error_message": str(code),
+            "traceback": traceback.format_exc(),
+        }))
+    raise SystemExit(code)
 except BaseException as exc:
     print(json.dumps({
         "status": "error",

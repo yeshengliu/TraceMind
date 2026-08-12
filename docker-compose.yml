@@ -16,7 +16,7 @@ services:
     network_mode: none
     read_only: true
     user: "65534:65534"
-    working_dir: /workspace
+    working_dir: /tmp
     cap_drop:
       - ALL
     security_opt:

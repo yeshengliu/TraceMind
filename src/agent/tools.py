@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
+import ast
+import sys
 from collections.abc import Callable
-from typing import Any, Literal
+from typing import Literal
 
-from langchain_core.tools import StructuredTool
 from pydantic import BaseModel, ConfigDict, Field
 
 from src.sandbox.test_sandbox import SandboxResult, run_in_sandbox
+
+
+_STDLIB_MODULES = frozenset(sys.stdlib_module_names)
 
 
 class StrictModel(BaseModel):
@@ -73,6 +77,43 @@ class PythonExecutionOutput(StrictModel):
         return cls.model_validate(result.model_dump())
 
 
+def validate_generated_code(code: str) -> str | None:
+    """Reject imports the offline stdlib-only sandbox cannot satisfy."""
+    try:
+        tree = ast.parse(code)
+    except SyntaxError as exc:
+        return (
+            "Sandbox contract violation: generated code is not valid Python "
+            f"(line {exc.lineno}: {exc.msg}). Return one complete, parseable "
+            "program; never place a literal newline inside a quoted string."
+        )
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                root = alias.name.split(".", 1)[0]
+                if root not in _STDLIB_MODULES:
+                    return (
+                        "Sandbox contract violation: the program imports "
+                        f"non-stdlib module {alias.name!r}, which is unavailable "
+                        "in the offline python:3.12-slim container. Replace it "
+                        "with a standard-library or self-contained implementation."
+                    )
+        elif (
+            isinstance(node, ast.ImportFrom)
+            and node.level == 0
+            and node.module is not None
+        ):
+            root = node.module.split(".", 1)[0]
+            if root not in _STDLIB_MODULES:
+                return (
+                    "Sandbox contract violation: the program imports "
+                    f"non-stdlib module {node.module!r}, which is unavailable "
+                    "in the offline python:3.12-slim container. Replace it "
+                    "with a standard-library or self-contained implementation."
+                )
+    return None
+
+
 SandboxRunner = Callable[..., SandboxResult]
 
 
@@ -84,19 +125,3 @@ def execute_python(
     """Validate a call, execute it in Phase 1, and validate the response."""
     result = runner(request.code, timeout_seconds=request.timeout_seconds)
     return PythonExecutionOutput.from_sandbox_result(result)
-
-
-def _python_sandbox_tool(code: str, timeout_seconds: float) -> dict[str, Any]:
-    request = PythonExecutionInput(code=code, timeout_seconds=timeout_seconds)
-    return execute_python(request).model_dump(mode="json")
-
-
-python_sandbox_tool = StructuredTool.from_function(
-    func=_python_sandbox_tool,
-    name="python_sandbox",
-    description=(
-        "Execute Python in an offline, unprivileged Docker container with strict "
-        "CPU, memory, PID, filesystem, and wall-clock limits."
-    ),
-    args_schema=PythonExecutionInput,
-)

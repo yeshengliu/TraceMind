@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 import docker
@@ -17,8 +18,14 @@ from src.agent.reflection import (
     apply_code_patch,
     parse_traceback,
 )
-from src.agent.tools import CodeGenerationOutput, PlanOutput, PlanStep, PythonExecutionInput
-from src.sandbox.test_sandbox import SandboxResult
+from src.agent.tools import (
+    CodeGenerationOutput,
+    PlanOutput,
+    PlanStep,
+    PythonExecutionInput,
+    validate_generated_code,
+)
+from src.sandbox.test_sandbox import SandboxResult, _CONTAINER_RUNNER
 
 
 USER_PROMPT = "Calculate the 50th Fibonacci number and plot a trend chart."
@@ -199,6 +206,32 @@ def test_tool_schema_rejects_unknown_fields_and_unsafe_timeout() -> None:
         PythonExecutionInput(code="print('hello')", timeout_seconds=31)
 
 
+def test_validate_generated_code_rejects_non_stdlib_imports() -> None:
+    assert validate_generated_code("import numpy as np\nprint(np.zeros(1))") is not None
+    assert (
+        validate_generated_code("from matplotlib import pyplot as plt\nplt.plot([1])")
+        is not None
+    )
+    assert (
+        validate_generated_code(
+            "def chart():\n    import plotly.express as px\n    return px"
+        )
+        is not None
+    )
+
+
+def test_validate_generated_code_accepts_stdlib_only_code() -> None:
+    code = (
+        "import json\n"
+        "from datetime import datetime\n"
+        "import statistics as stats\n"
+        'print(json.dumps({"day": datetime.now().isoformat()}))\n'
+        "print(stats.median([1, 2, 3]))\n"
+    )
+    assert validate_generated_code(code) is None
+    assert validate_generated_code("this is not python :::") is not None
+
+
 class InvalidThenValidCoder:
     def __init__(self) -> None:
         self.calls = 0
@@ -240,6 +273,86 @@ def test_coder_schema_violation_enters_bounded_healing_loop() -> None:
     assert len(final_state["execution_artifacts"]) == 1
     assert "Coder schema validation failed" in final_state["error_stack"][0]
     assert coder.calls == 2
+
+
+class FailingPlanner:
+    def invoke(self, input: object, **kwargs: Any) -> PlanOutput:
+        raise RuntimeError("ollama offline")
+
+
+class ExplodingCoder:
+    def invoke(self, input: object, **kwargs: Any) -> CodeGenerationOutput:
+        raise AssertionError("coder must not be called after a planner failure")
+
+
+def test_planner_failure_ends_run_without_calling_coder() -> None:
+    app = create_graph(
+        planner=FailingPlanner(),
+        coder=ExplodingCoder(),
+        sandbox_runner=_always_succeeds,
+    )
+    final_state: AgentState = app.invoke(initial_state(USER_PROMPT))
+
+    assert final_state["status"] == "failed"
+    assert "Planner invocation failed: RuntimeError: ollama offline" in final_state[
+        "error_stack"
+    ][-1]
+    assert "ollama offline" in final_state["final_output"]
+
+
+class AlwaysRaisingCoder:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def invoke(self, input: object, **kwargs: Any) -> CodeGenerationOutput:
+        self.calls += 1
+        raise RuntimeError("model timeout")
+
+
+def test_coder_invocation_exception_enters_bounded_healing_loop() -> None:
+    coder = AlwaysRaisingCoder()
+    app = create_graph(
+        planner=StaticPlanner(),
+        coder=coder,
+        sandbox_runner=_always_succeeds,
+        max_retries=3,
+    )
+    final_state: AgentState = app.invoke(initial_state(USER_PROMPT))
+
+    assert final_state["status"] == "failed"
+    assert final_state["retry_count"] == 3
+    assert coder.calls == 4
+    assert "Coder invocation failed: RuntimeError: model timeout" in final_state[
+        "error_stack"
+    ][-1]
+    assert "model timeout" in final_state["final_output"]
+
+
+def test_sandbox_runner_treats_clean_system_exit_as_success(
+    capsys: Any,
+    monkeypatch: Any,
+) -> None:
+    monkeypatch.setenv("TRACEMIND_SNIPPET", "import sys\nsys.exit(0)\n")
+    with pytest.raises(SystemExit) as excinfo:
+        exec(compile(_CONTAINER_RUNNER, "<runner>", "exec"), {"__name__": "__runner__"})
+
+    assert excinfo.value.code == 0
+    payload = json.loads(capsys.readouterr().out.splitlines()[-1])
+    assert payload["status"] == "success"
+
+
+def test_sandbox_runner_reports_nonzero_system_exit_as_error(
+    capsys: Any,
+    monkeypatch: Any,
+) -> None:
+    monkeypatch.setenv("TRACEMIND_SNIPPET", "import sys\nsys.exit(3)\n")
+    with pytest.raises(SystemExit) as excinfo:
+        exec(compile(_CONTAINER_RUNNER, "<runner>", "exec"), {"__name__": "__runner__"})
+
+    assert excinfo.value.code == 3
+    payload = json.loads(capsys.readouterr().out.splitlines()[-1])
+    assert payload["status"] == "error"
+    assert payload["error_type"] == "SystemExit"
 
 
 @pytest.mark.ollama
